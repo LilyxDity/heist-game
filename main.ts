@@ -21,8 +21,15 @@ const repoRoot = dirname(fileURLToPath(import.meta.url));
 const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
 
 // Start clean so a stale file from an earlier run can never leak in.
-if (existsSync(outDir)) rmSync(outDir, { recursive: true, force: true });
+// Never remove the output directory itself: in the grader /output is a
+// mounted volume on a read-only root filesystem, so deleting it fails
+// (EBUSY/EROFS) and the run exits 1. Clear only the known children we
+// are about to overwrite instead.
 mkdirSync(outDir, { recursive: true });
+for (const child of ["game", "screenshots", "dossier.json"]) {
+  const target = join(outDir, child);
+  if (existsSync(target)) rmSync(target, { recursive: true, force: true });
+}
 
 // The game itself, then the screenshots the entry is judged on.
 cpSync(join(repoRoot, "game"), join(outDir, "game"), { recursive: true });
