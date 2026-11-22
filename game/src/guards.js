@@ -1,127 +1,148 @@
-// The guards. Each one walks its patrol route, pauses at every waypoint
-// to look around, and watches a vision cone ahead of it. A thief inside
-// the cone builds suspicion; a full suspicion bar turns the guard into a
-// chaser, and a chaser that reaches the thief ends the heist. Lose sight
-// for a while and the guard gives up and walks back to its route.
-import { GUARD, GUARD_DEFS } from './config.js';
-import { angleDelta, distance, inVisionCone, moveCircle } from './geometry.js';
+// The guards. Each one walks a beat, watches a cone, and gets suspicious.
+// A guard has four moods: patrol (walking the beat), suspicious (going to
+// look at something), chase (running at the thief) and search (lost the
+// thief, looking around). Suspicion is the meter between them.
 
-export const GUARD_PATROL = 'patrol';
-export const GUARD_CHASE = 'chase';
-export const GUARD_RETURN = 'return';
+import { GUARDS, SUSPICION, RULES, ROOM } from './config.js';
+import { angleDiff, distance, lineOfSightClear, moveCircle, segmentCrossesCircle } from './geometry.js';
 
-const PAUSE_SECONDS = 1.4; // how long a guard looks around at each waypoint
-const LOOK_AROUND = 0.9; // radians per second while pausing
-
-export function createGuards() {
-  return GUARD_DEFS.map((def, index) => {
-    const [startX, startY] = def.waypoints[def.start];
-    const next = def.waypoints[(def.start + 1) % def.waypoints.length];
-    return {
-      name: def.name,
-      x: startX,
-      y: startY,
-      facing: Math.atan2(next[1] - startY, next[0] - startX),
-      waypoints: def.waypoints,
-      waypointIndex: (def.start + 1) % def.waypoints.length,
-      pauseLeft: index * 0.5, // stagger the patrols so the cones never sync up
-      mode: GUARD_PATROL,
-      suspicion: 0,
-      seen: false, // thief in this guard's cone right now
-      lastSeenX: 0,
-      lastSeenY: 0,
-      memoryLeft: 0,
-    };
-  });
+// Build one guard from its config entry. Guards start on the first point
+// of their beat, facing down the lane.
+export function makeGuard(def, index) {
+  const start = def.waypoints[0];
+  const next = def.waypoints[1];
+  return {
+    id: index,
+    name: def.name,
+    x: start[0],
+    y: start[1],
+    // Radians: 0 points east, PI/2 points south (down the screen).
+    facing: Math.atan2(next[1] - start[1], next[0] - start[0]),
+    mode: 'patrol',
+    suspicion: 0,
+    seen: false,
+    waypoints: def.waypoints,
+    wpIndex: 1,
+    patrolSpeed: def.patrolSpeed,
+    chaseSpeed: def.chaseSpeed,
+    visionRange: def.visionRange,
+    visionHalfAngle: def.visionHalfAngle,
+    lastSeenX: start[0],
+    lastSeenY: start[1],
+    memoryLeft: 0,
+    searchLeft: 0,
+    pauseLeft: 0,
+  };
 }
 
-// Does this guard see the thief right now? Smoke blinds it; sneaking
-// shrinks the range a little, since a crouched thief is harder to spot.
-export function guardSeesThief(guard, thief, smokeClouds) {
-  if (smokeClouds.some((cloud) => distance(thief.x, thief.y, cloud.x, cloud.y) < cloud.radius)) {
-    return false;
+export function makeGuards() {
+  return GUARDS.map((def, i) => makeGuard(def, i));
+}
+
+// Can this guard see the thief right now? Range, cone, a clear line past
+// the cases, and no smoke cloud sitting between the two of them.
+export function guardCanSee(g, thief, walls, smoke) {
+  const dist = distance(g.x, g.y, thief.x, thief.y);
+  if (dist > g.visionRange) return false;
+  const angle = Math.atan2(thief.y - g.y, thief.x - g.x);
+  if (Math.abs(angleDiff(angle, g.facing)) > g.visionHalfAngle) return false;
+  if (!lineOfSightClear(g.x, g.y, thief.x, thief.y, walls)) return false;
+  for (const cloud of smoke) {
+    if (segmentCrossesCircle(g.x, g.y, thief.x, thief.y, cloud.x, cloud.y, cloud.radius)) {
+      return false;
+    }
   }
-  const range = thief.sneaking ? GUARD.viewRange * 0.82 : GUARD.viewRange;
-  return inVisionCone(guard.x, guard.y, guard.facing, range, GUARD.viewHalfAngle, thief.x, thief.y);
+  return true;
 }
 
-function walkToward(guard, targetX, targetY, speed, dt) {
-  const dist = distance(guard.x, guard.y, targetX, targetY);
-  if (dist < 1) return true;
+function walkToward(g, tx, ty, speed, dt, walls) {
+  const dx = tx - g.x;
+  const dy = ty - g.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1) return 0;
   const step = Math.min(dist, speed * dt);
-  const nx = guard.x + ((targetX - guard.x) / dist) * step;
-  const ny = guard.y + ((targetY - guard.y) / dist) * step;
-  const moved = moveCircle(guard.x, guard.y, GUARD.radius, nx - guard.x, ny - guard.y);
-  guard.x = moved.x;
-  guard.y = moved.y;
-  const wanted = Math.atan2(targetY - guard.y, targetX - guard.x);
-  guard.facing += angleDelta(guard.facing, wanted) * Math.min(1, dt * 8);
-  return dist <= step + 1;
+  const mx = (dx / dist) * step;
+  const my = (dy / dist) * step;
+  g.facing = Math.atan2(dy, dx);
+  moveCircle(g, mx, my, 14, walls, ROOM);
+  return dist - step;
 }
 
-export function updateGuard(guard, dt, thief, smokeClouds, lockdown) {
-  guard.seen = guardSeesThief(guard, thief, smokeClouds);
+// One fixed step of one guard. Returns 'caught' when the guard lays a hand
+// on the thief, 'chase' the first step a chase begins, and null otherwise.
+export function updateGuard(g, dt, ctx) {
+  const { thief, walls, smoke } = ctx;
 
-  if (guard.seen) {
-    guard.lastSeenX = thief.x;
-    guard.lastSeenY = thief.y;
-    guard.memoryLeft = GUARD.chaseMemory;
-    const rate = thief.sneaking ? GUARD.suspectRate * 0.5 : GUARD.suspectRate;
-    guard.suspicion = Math.min(100, guard.suspicion + rate * dt);
-    if (guard.suspicion >= 100 && guard.mode !== GUARD_CHASE) {
-      guard.mode = GUARD_CHASE;
+  const sees = guardCanSee(g, thief, walls, smoke);
+  g.seen = sees;
+
+  if (sees) {
+    const dist = distance(g.x, g.y, thief.x, thief.y);
+    const closeness = 1 - dist / g.visionRange;
+    let rate = SUSPICION.baseRate + SUSPICION.closeBonus * closeness;
+    if (thief.sneaking) rate *= SUSPICION.sneakFactor;
+    g.suspicion = Math.min(SUSPICION.chaseAt, g.suspicion + rate * dt);
+    g.lastSeenX = thief.x;
+    g.lastSeenY = thief.y;
+    g.memoryLeft = SUSPICION.memorySeconds;
+    if (g.suspicion >= SUSPICION.chaseAt && g.mode !== 'chase') {
+      g.mode = 'chase';
+      return 'chase';
+    }
+    if (g.suspicion >= SUSPICION.investigateAt && g.mode === 'patrol') {
+      g.mode = 'suspicious';
     }
   } else {
-    guard.memoryLeft = Math.max(0, guard.memoryLeft - dt);
-    if (guard.mode !== GUARD_CHASE) {
-      guard.suspicion = Math.max(0, guard.suspicion - GUARD.suspectDecay * dt);
-    }
-  }
-
-  if (guard.mode === GUARD_CHASE) {
-    // Hunt the last place the thief was seen; give up when the trail is cold.
-    const reached = walkToward(guard, guard.lastSeenX, guard.lastSeenY, GUARD.chaseSpeed, dt);
-    if (!guard.seen && (guard.memoryLeft <= 0 || reached)) {
-      guard.mode = GUARD_RETURN;
-      guard.suspicion = 40;
-    }
-    return;
-  }
-
-  if (guard.mode === GUARD_RETURN) {
-    // Walk back to the nearest waypoint, then resume the patrol.
-    let nearest = 0;
-    let nearestDist = Infinity;
-    guard.waypoints.forEach(([wx, wy], index) => {
-      const d = distance(guard.x, guard.y, wx, wy);
-      if (d < nearestDist) {
-        nearestDist = d;
-        nearest = index;
+    g.suspicion = Math.max(0, g.suspicion - SUSPICION.decayRate * dt);
+    if (g.mode === 'chase') {
+      g.memoryLeft -= dt;
+      if (g.memoryLeft <= 0) {
+        g.mode = 'search';
+        g.searchLeft = 3;
       }
-    });
-    if (walkToward(guard, guard.waypoints[nearest][0], guard.waypoints[nearest][1], GUARD.patrolSpeed * 1.4, dt)) {
-      guard.mode = GUARD_PATROL;
-      guard.waypointIndex = (nearest + 1) % guard.waypoints.length;
-      guard.pauseLeft = 0.6;
     }
-    return;
   }
 
-  // Patrol: walk to the next waypoint, pause there and look around.
-  if (guard.pauseLeft > 0) {
-    guard.pauseLeft -= dt;
-    guard.facing += LOOK_AROUND * dt * (guard.waypointIndex % 2 === 0 ? 1 : -1);
-    return;
+  if (g.mode === 'patrol') {
+    if (g.pauseLeft > 0) {
+      g.pauseLeft -= dt;
+      return null;
+    }
+    const target = g.waypoints[g.wpIndex];
+    const remaining = walkToward(g, target[0], target[1], g.patrolSpeed, dt, walls);
+    if (remaining <= 2) {
+      // Turn around at the end of the beat and pause a beat to look around.
+      g.wpIndex = g.wpIndex + 1 >= g.waypoints.length ? 0 : g.wpIndex + 1;
+      g.pauseLeft = 0.7;
+    }
+    return null;
   }
-  const [tx, ty] = guard.waypoints[guard.waypointIndex];
-  const speed = lockdown ? GUARD.patrolSpeed * 1.5 : GUARD.patrolSpeed;
-  if (walkToward(guard, tx, ty, speed, dt)) {
-    guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
-    guard.pauseLeft = PAUSE_SECONDS;
-  }
-}
 
-// A chasing guard that closes the gap ends the run.
-export function guardCatchesThief(guard, thief) {
-  return guard.mode === GUARD_CHASE && distance(guard.x, guard.y, thief.x, thief.y) < GUARD.catchRange;
+  if (g.mode === 'suspicious') {
+    const remaining = walkToward(g, g.lastSeenX, g.lastSeenY, g.patrolSpeed * 1.3, dt, walls);
+    if (remaining <= 10) {
+      g.mode = 'search';
+      g.searchLeft = 2.5;
+    }
+    return null;
+  }
+
+  if (g.mode === 'chase') {
+    const tx = g.seen ? thief.x : g.lastSeenX;
+    const ty = g.seen ? thief.y : g.lastSeenY;
+    walkToward(g, tx, ty, g.chaseSpeed, dt, walls);
+    if (distance(g.x, g.y, thief.x, thief.y) <= RULES.catchDistance) {
+      return 'caught';
+    }
+    return null;
+  }
+
+  // search: stand still and sweep the room, then give up and go back.
+  g.searchLeft -= dt;
+  g.facing += 1.7 * dt;
+  if (g.searchLeft <= 0) {
+    g.mode = 'patrol';
+    g.suspicion = Math.min(g.suspicion, SUSPICION.investigateAt - 1);
+  }
+  return null;
 }

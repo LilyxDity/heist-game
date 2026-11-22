@@ -1,135 +1,133 @@
-// The screenshot scenes behind ?shot=cover|spotted|loot|escape. Each one
-// sets the real game state to a moment a player actually reaches —
-// mid-crossing, caught in a cone, diamond in hand, the getaway screen —
-// then runs the world forward a few fixed steps so the patrols and camera
-// sweeps sit naturally. The frame is painted by the same renderer the game
-// plays with.
-import { GADGETS, STEP } from './config.js';
-import { GUARD_CHASE } from './guards.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { STATUS_ESCAPED } from './world.js';
+// Screenshot staging: ?shot=cover|spotted|loot|escape (with ?seed=) puts
+// the game into a fixed, photogenic moment for the screenshots the entry
+// ships. The staged state is a real game state — the same fields, the same
+// values a player could reach — just placed there directly instead of
+// played into. The plain game (no ?shot=) never touches this file's code.
 
-function idle(world, seconds) {
-  for (let t = 0; t < seconds; t += STEP) world.step(STEP, { x: 0, y: 0 }, false, []);
+import { finishEscape, setMessage } from './world.js';
+
+// Put a guard mid-beat: at (x, y), facing along its lane, walking towards
+// the waypoint numbered `to`.
+function placeGuard(state, index, x, y, facing, to) {
+  const g = state.guards[index];
+  g.x = x;
+  g.y = y;
+  g.facing = facing;
+  g.wpIndex = to;
+  g.mode = 'patrol';
+  g.suspicion = 0;
+  g.seen = false;
+  g.memoryLeft = 0;
 }
 
-function placeGuard(guard, x, y, facing, suspicion = 0) {
-  guard.x = x;
-  guard.y = y;
-  guard.facing = facing;
-  guard.suspicion = suspicion;
-  guard.pauseLeft = 0;
+function placeCamera(state, index, angle) {
+  state.cameras[index].angle = angle;
+  state.cameras[index].seen = false;
+  state.cameras[index].disabledLeft = 0;
 }
 
-// The cover: the thief crossing the hall, every system visible in one
-// frame — the room, the guards with their cones, the cameras, the diamond
-// on its pedestal and the alarm meter with a little heat on it.
-function stageCover(world) {
-  const s = world.state;
-  s.thief.x = 430;
-  s.thief.y = 470;
-  s.thief.facing = Math.PI / 4;
-  s.thief.sneaking = true;
-  placeGuard(s.guards[0], 180, 300, Math.PI / 2);
-  placeGuard(s.guards[1], 560, 392, 0);
-  placeGuard(s.guards[2], 1100, 420, -Math.PI / 2);
-  s.cameras[0].time = 1.2;
-  s.cameras[1].time = 4.4;
-  s.alarm = 32;
-  s.maxAlarm = 32;
-  const gold = s.loot.find((item) => item.id === 'gold-west');
-  gold.taken = true;
-  s.thief.lootTaken += gold.value;
-  s.thief.lootCount += 1;
-  idle(world, 0.8);
-  return { screen: SCREEN_PLAY };
+function takeLoot(state, kind) {
+  const item = state.loot.find((i) => i.kind === kind && !i.taken);
+  if (!item) return;
+  item.taken = true;
+  state.thief.lootTaken += item.value;
+  state.thief.lootCount += 1;
+  if (kind === 'diamond') state.thief.hasDiamond = true;
 }
 
-// Spotted: Vega has the thief dead in its cone and is closing in, the
-// alarm is high and the frame is flashing red.
-function stageSpotted(world) {
-  const s = world.state;
-  s.thief.x = 700;
-  s.thief.y = 330;
-  s.thief.facing = Math.PI;
-  s.thief.sneaking = false;
-  placeGuard(s.guards[0], 180, 520, -Math.PI / 2);
-  placeGuard(s.guards[1], 585, 392, -0.5, 100);
-  s.guards[1].mode = GUARD_CHASE;
-  s.guards[1].lastSeenX = s.thief.x;
-  s.guards[1].lastSeenY = s.thief.y;
-  s.guards[1].memoryLeft = 4;
-  placeGuard(s.guards[2], 1100, 200, Math.PI / 2);
-  s.cameras[0].time = 2.6;
-  s.cameras[1].time = 0.4;
-  s.alarm = 74;
-  s.maxAlarm = 74;
-  s.time = 96;
-  idle(world, 0.4);
-  return { screen: SCREEN_PLAY };
+// The cover: the whole room in one frame — thief mid-floor, cones
+// sweeping, the diamond glowing, the alarm meter up top.
+function stageCover(state) {
+  state.status = 'playing';
+  state.thief.x = 400;
+  state.thief.y = 500;
+  state.thief.facing = -Math.PI / 2;
+  placeGuard(state, 0, 620, 90, 0, 1);
+  placeGuard(state, 1, 480, 400, Math.PI, 0);
+  placeGuard(state, 2, 820, 640, Math.PI, 1);
+  placeCamera(state, 0, Math.PI / 2 + 0.45);
+  placeCamera(state, 1, -0.35);
+  state.alarm = 6;
+  state.maxAlarm = 6;
+  setMessage(state, 'Get the Star of Meridian. Get out the roof door.', 4);
 }
 
-// The grab: the thief has just lifted the Star of Meridian off its pedestal.
-function stageLoot(world) {
-  const s = world.state;
-  s.thief.x = 640;
-  s.thief.y = 372;
-  s.thief.facing = -Math.PI / 2;
-  s.thief.sneaking = true;
-  const diamond = s.loot.find((item) => item.kind === 'diamond');
-  diamond.taken = true;
-  s.thief.hasDiamond = true;
-  s.thief.lootTaken += diamond.value;
-  s.thief.lootCount += 1;
-  const gold = s.loot.find((item) => item.id === 'gold-north');
-  gold.taken = true;
-  s.thief.lootTaken += gold.value;
-  s.thief.lootCount += 1;
-  s.floating.push({ x: 640, y: 250, text: '+$500,000 STAR OF MERIDIAN', color: '#bfe9ff', ttl: 2.2 });
-  placeGuard(s.guards[0], 180, 180, Math.PI / 2);
-  placeGuard(s.guards[1], 810, 392, Math.PI, 18);
-  placeGuard(s.guards[2], 1100, 560, -Math.PI / 2);
-  s.cameras[0].time = 3.8;
-  s.cameras[1].time = 1.0;
-  s.alarm = 18;
-  s.maxAlarm = 18;
-  s.time = 141;
-  idle(world, 0.5);
-  return { screen: SCREEN_PLAY };
+// Spotted: guard B has the thief dead in his cone and is already running.
+function stageSpotted(state) {
+  state.status = 'playing';
+  state.thief.x = 540;
+  state.thief.y = 400;
+  state.thief.facing = 0;
+  placeGuard(state, 0, 700, 90, 0, 1);
+  placeGuard(state, 2, 500, 640, 0, 0);
+  const b = state.guards[1];
+  b.x = 640;
+  b.y = 400;
+  b.facing = Math.PI;
+  b.mode = 'chase';
+  b.suspicion = 100;
+  b.seen = true;
+  b.lastSeenX = state.thief.x;
+  b.lastSeenY = state.thief.y;
+  b.memoryLeft = 4;
+  placeCamera(state, 0, Math.PI / 2 - 0.3);
+  placeCamera(state, 1, 0.2);
+  state.alarm = 79;
+  state.maxAlarm = 79;
+  state.spotted = true;
+  state.everSpotted = true;
+  setMessage(state, 'SPOTTED — run!', 4);
 }
 
-// The getaway: the end screen with the score broken down.
-function stageEscape(world) {
-  const s = world.state;
-  s.thief.x = 1160;
-  s.thief.y = 60;
-  s.thief.hasDiamond = true;
-  s.thief.lootTaken = 550000;
-  s.thief.lootCount = 3;
-  for (const item of s.loot) {
-    if (item.kind === 'diamond' || item.id === 'gold-west' || item.id === 'gold-north') item.taken = true;
-  }
-  s.smokeLeft = GADGETS.smokeCount - 1;
-  s.gadgetCost = GADGETS.smokeCost;
-  s.time = 187;
-  s.alarm = 41;
-  s.maxAlarm = 41;
-  s.status = STATUS_ESCAPED;
-  s.timeBonus = (300 - 187) * 100;
-  s.score = s.thief.lootTaken + s.timeBonus - s.gadgetCost;
-  s.grade = 'SMOOTH';
-  placeGuard(s.guards[0], 180, 420, Math.PI / 2);
-  placeGuard(s.guards[1], 640, 392, Math.PI);
-  placeGuard(s.guards[2], 1100, 300, -Math.PI / 2);
-  return { screen: SCREEN_OVER };
+// The grab: the thief's hand is on the Star of Meridian. She stands just
+// above the plinth, in open floor, so the grab reads clearly.
+function stageLoot(state) {
+  state.status = 'playing';
+  state.thief.x = 640;
+  state.thief.y = 272;
+  state.thief.facing = -Math.PI / 2;
+  takeLoot(state, 'diamond');
+  placeGuard(state, 0, 300, 90, 0, 1);
+  placeGuard(state, 1, 900, 400, 0, 1);
+  placeGuard(state, 2, 400, 640, 0, 0);
+  placeCamera(state, 0, Math.PI / 2 + 0.2);
+  placeCamera(state, 1, 0.4);
+  state.alarm = 12;
+  state.maxAlarm = 12;
+  setMessage(state, '+$50,000 — Star of Meridian', 4);
 }
 
-export function stageShot(name, world) {
-  world.reset();
-  if (name === 'cover') return stageCover(world);
-  if (name === 'spotted') return stageSpotted(world);
-  if (name === 'loot') return stageLoot(world);
-  if (name === 'escape') return stageEscape(world);
-  idle(world, 1.5);
-  return { screen: SCREEN_TITLE };
+// The getaway: the win screen, score and grade, after a quiet run.
+function stageEscape(state) {
+  takeLoot(state, 'diamond');
+  takeLoot(state, 'gold');
+  state.thief.x = 1160;
+  state.thief.y = 40;
+  state.thief.facing = -Math.PI / 2;
+  placeGuard(state, 0, 500, 90, Math.PI, 0);
+  placeGuard(state, 1, 700, 400, 0, 1);
+  placeGuard(state, 2, 900, 640, Math.PI, 1);
+  state.alarm = 34;
+  state.maxAlarm = 34;
+  state.everSpotted = false;
+  finishEscape(state);
 }
+
+const STAGES = {
+  cover: stageCover,
+  spotted: stageSpotted,
+  loot: stageLoot,
+  escape: stageEscape,
+};
+
+// Stage the state for a named shot, or leave it alone when the name is
+// not one of the four. Returns true when a stage was applied.
+export function applyShot(state, name) {
+  const stage = STAGES[name];
+  if (!stage) return false;
+  stage(state);
+  return true;
+}
+
+// The four shots the entry ships, in the order they are named on disk.
+export const SHOT_NAMES = ['cover', 'spotted', 'loot', 'escape'];

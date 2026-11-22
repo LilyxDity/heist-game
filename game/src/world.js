@@ -1,183 +1,257 @@
-// The world: one heist, from the moment the thief slips in to the getaway.
-// It owns the thief, the guards, the cameras, the loot, the alarm meter and
-// the gadgets, and steps them all forward in fixed 1/60 s slices. Each step
-// returns the events it caused (pickup, spotted, caught, escaped), so the
-// shell can play sounds and announce them.
-import { ALARM, CAMERA, COLORS, EXIT, GADGETS, LOOT_VALUE, STEP, TIME_BONUS_CAP_SECONDS, TIME_BONUS_PER_SECOND, WALL } from './config.js';
-import { createCameras, disableCameras, updateCamera } from './cameras.js';
-import { createGuards, guardCatchesThief, updateGuard } from './guards.js';
-import { createLoot, createThief, grabLoot, lootInReach, updateThief } from './thief.js';
+// The world: the whole game state and one fixed step of it. The state is a
+// single plain object so the page, the tests and the screenshots can all
+// read it through window.__heist.state, and so a restart can swap in a
+// fresh one without changing the object's identity.
+//
+// Statuses: 'title' -> 'playing' -> 'caught' | 'police' | 'escaped'.
+// The alarm climbs while anyone sees the thief; at 100 the museum locks
+// down and the police arrive twelve seconds later.
 
-export const STATUS_PLAYING = 'playing';
-export const STATUS_CAUGHT = 'caught';
-export const STATUS_POLICE = 'police';
-export const STATUS_ESCAPED = 'escaped';
+import { ALARM, EXIT, GADGETS, LOOT, RULES, WALLS } from './config.js';
+import { makeGuards, updateGuard } from './guards.js';
+import { makeCameras, updateCamera } from './cameras.js';
+import { makeThief, updateThief, tryGrab, useSmoke, useEmp } from './thief.js';
 
-export const EVENT_PICKUP = 'pickup';
-export const EVENT_DIAMOND = 'diamond';
-export const EVENT_SPOTTED = 'spotted';
-export const EVENT_ALARM_TICK = 'alarm-tick';
-export const EVENT_GADGET = 'gadget';
-export const EVENT_CAUGHT = 'caught';
-export const EVENT_POLICE = 'police';
-export const EVENT_ESCAPED = 'escaped';
-export const EVENT_LOCKDOWN = 'lockdown';
+export const STEP = 1 / 60;
 
-export function createWorld(random) {
-  const state = {
-    random,
-    thief: createThief(),
-    guards: createGuards(),
-    cameras: createCameras(),
-    loot: createLoot(),
+// A brand-new run: title screen up, thief at the spawn, everyone on beat.
+export function createState(seed) {
+  return {
+    seed: seed || 1,
+    status: 'title',
+    paused: false,
+    time: 0,
     alarm: 0,
     maxAlarm: 0,
     lockdown: false,
-    policeLeft: 0,
-    smoke: [], // {x, y, radius, ttl}
-    empLeft: 0,
-    smokeLeft: GADGETS.smokeCount,
-    empLeftCount: GADGETS.empCount,
-    gadgetCost: 0,
-    time: 0,
-    status: STATUS_PLAYING,
+    policeLeft: ALARM.lockdownSeconds,
     spotted: false,
-    exitHintLeft: 0,
-    alarmTickLeft: 0,
-    floating: [], // {x, y, text, color, ttl}
+    everSpotted: false,
     score: 0,
-    timeBonus: 0,
-    grade: '',
+    grade: '—',
+    endReason: '',
+    thief: makeThief(),
+    guards: makeGuards(),
+    cameras: makeCameras(),
+    loot: LOOT.map((item) => ({ ...item, taken: false })),
+    walls: WALLS,
+    smoke: [],
+    smokeLeft: GADGETS.smoke.startCount,
+    empLeftCount: GADGETS.emp.startCount,
+    gadgetCost: 0,
+    message: '',
+    messageLeft: 0,
+    blipLeft: 0,
   };
-
-  function reset() {
-    // Fresh state, copied field by field onto the same object the shell
-    // already holds — copy fresh.state, not the fresh world wrapper.
-    const fresh = createWorld(random);
-    Object.assign(state, fresh.state);
-  }
-
-  function addFloating(x, y, text, color) {
-    state.floating.push({ x, y, text, color, ttl: 2.2 });
-  }
-
-  function gradeFor(maxAlarm) {
-    if (maxAlarm < 25) return 'GHOST';
-    if (maxAlarm < 60) return 'SMOOTH';
-    return 'LOUD';
-  }
-
-  function finishEscape() {
-    state.status = STATUS_ESCAPED;
-    state.timeBonus = Math.max(0, TIME_BONUS_CAP_SECONDS - Math.floor(state.time)) * TIME_BONUS_PER_SECOND;
-    state.score = state.thief.lootTaken + state.timeBonus - state.gadgetCost;
-    state.grade = gradeFor(state.maxAlarm);
-  }
-
-  // One fixed step. `move` is the thief's move vector, `sneaking` its
-  // stance, and `actions` the edge-triggered actions pressed this frame.
-  function step(dt, move, sneaking, actions) {
-    const events = [];
-    if (state.status !== STATUS_PLAYING) return events;
-    state.time += dt;
-
-    updateThief(state.thief, move, sneaking, dt);
-
-    for (const action of actions) {
-      if (action === 'interact') {
-        const item = grabLoot(state.thief, state.loot);
-        if (item) {
-          addFloating(item.x, item.y - 24, `+$${item.value.toLocaleString('en-US')} ${item.label}`, item.kind === 'diamond' ? COLORS.diamond : COLORS.gold);
-          events.push(item.kind === 'diamond' ? EVENT_DIAMOND : EVENT_PICKUP);
-        }
-      } else if (action === 'smoke' && state.smokeLeft > 0) {
-        state.smokeLeft -= 1;
-        state.gadgetCost += GADGETS.smokeCost;
-        state.smoke.push({ x: state.thief.x, y: state.thief.y, radius: GADGETS.smokeRadius, ttl: GADGETS.smokeSeconds });
-        addFloating(state.thief.x, state.thief.y - 28, `SMOKE  -$${GADGETS.smokeCost.toLocaleString('en-US')}`, '#cfd6e4');
-        events.push(EVENT_GADGET);
-      } else if (action === 'emp' && state.empLeftCount > 0) {
-        state.empLeftCount -= 1;
-        state.gadgetCost += GADGETS.empCost;
-        state.empLeft = GADGETS.empSeconds;
-        disableCameras(state.cameras, GADGETS.empSeconds);
-        addFloating(state.thief.x, state.thief.y - 28, `EMP — CAMERAS DOWN  -$${GADGETS.empCost.toLocaleString('en-US')}`, '#8fd8ff');
-        events.push(EVENT_GADGET);
-      }
-    }
-
-    for (const cloud of state.smoke) cloud.ttl -= dt;
-    state.smoke = state.smoke.filter((cloud) => cloud.ttl > 0);
-    if (state.empLeft > 0) state.empLeft = Math.max(0, state.empLeft - dt);
-    if (state.exitHintLeft > 0) state.exitHintLeft -= dt;
-    for (const text of state.floating) {
-      text.ttl -= dt;
-      text.y -= 22 * dt;
-    }
-    state.floating = state.floating.filter((text) => text.ttl > 0);
-
-    for (const guard of state.guards) updateGuard(guard, dt, state.thief, state.smoke, state.lockdown);
-    for (const camera of state.cameras) updateCamera(camera, dt, state.thief, state.smoke);
-
-    // The alarm: the worst eye on the thief sets the rate; hidden, it falls.
-    const seenByGuard = state.guards.some((guard) => guard.seen);
-    const seenByCamera = state.cameras.some((camera) => camera.seen);
-    const wasSpotted = state.spotted;
-    state.spotted = seenByGuard || seenByCamera;
-    if (state.spotted && !wasSpotted) events.push(EVENT_SPOTTED);
-    if (state.spotted) {
-      let rate = 0;
-      if (seenByGuard) rate = Math.max(rate, ALARM.guardSightRate);
-      if (seenByCamera) rate = Math.max(rate, CAMERA.alarmRate);
-      state.alarm = Math.min(100, state.alarm + rate * dt);
-      state.alarmTickLeft -= dt;
-      if (state.alarmTickLeft <= 0) {
-        state.alarmTickLeft = 0.5;
-        events.push(EVENT_ALARM_TICK);
-      }
-    } else if (!state.lockdown && state.alarm < 100) {
-      // A maxed alarm never decays away on its own: it locks the gallery down.
-      state.alarm = Math.max(0, state.alarm - ALARM.decayRate * dt);
-    }
-    state.maxAlarm = Math.max(state.maxAlarm, state.alarm);
-
-    if (state.alarm >= 100 && !state.lockdown) {
-      state.lockdown = true;
-      state.policeLeft = ALARM.lockdownSeconds;
-      events.push(EVENT_LOCKDOWN);
-    }
-    if (state.lockdown) {
-      state.policeLeft -= dt;
-      if (state.policeLeft <= 0) {
-        state.status = STATUS_POLICE;
-        events.push(EVENT_POLICE);
-        return events;
-      }
-    }
-
-    // A chasing guard that closes the gap ends the run.
-    if (state.guards.some((guard) => guardCatchesThief(guard, state.thief))) {
-      state.status = STATUS_CAUGHT;
-      events.push(EVENT_CAUGHT);
-      return events;
-    }
-
-    // The service exit, top right: open only to a thief carrying the diamond.
-    const thief = state.thief;
-    const atExit = thief.y <= WALL + 16 && thief.x >= EXIT.x - 6 && thief.x <= EXIT.x + EXIT.w + 6;
-    if (atExit) {
-      if (thief.hasDiamond) {
-        finishEscape();
-        events.push(EVENT_ESCAPED);
-      } else if (state.exitHintLeft <= 0) {
-        state.exitHintLeft = 2.5;
-        addFloating(thief.x, thief.y + 34, 'LOCKED — STEAL THE DIAMOND FIRST', '#ff8a8a');
-      }
-    }
-    return events;
-  }
-
-  return { state, reset, step, lootInReach: () => lootInReach(state.thief, state.loot) };
 }
 
-export { STEP };
+// Restart in place: copy a fresh state over this one, field by field, so
+// every reference to the state object keeps working. Copying the fresh
+// state itself — not any wrapper around it — is what makes this correct.
+export function reset(state, seed) {
+  const fresh = createState(seed === undefined ? state.seed : seed);
+  Object.assign(state, fresh);
+}
+
+export function setMessage(state, text, seconds) {
+  state.message = text;
+  state.messageLeft = seconds || 2.5;
+}
+
+function money(n) {
+  return '$' + n.toLocaleString('en-US');
+}
+
+// The getaway pays off: loot, minus what the gadgets cost, plus a bonus
+// for getting out at all. The grade reads the worst the alarm ever got.
+export function finishEscape(state) {
+  state.status = 'escaped';
+  state.score = Math.max(0, state.thief.lootTaken - state.gadgetCost + RULES.escapeBonus);
+  if (state.maxAlarm <= RULES.ghostMaxAlarm) state.grade = 'GHOST';
+  else if (state.maxAlarm <= RULES.smoothMaxAlarm) state.grade = 'SMOOTH';
+  else state.grade = 'LOUD';
+  state.endReason = 'You slipped out the roof door with the Star of Meridian.';
+}
+
+function finishCaught(state) {
+  state.status = 'caught';
+  state.endReason = 'A guard got a hand on you under the skylight.';
+}
+
+function finishPolice(state) {
+  state.status = 'police';
+  state.endReason = 'The police arrived while the doors were locked down.';
+}
+
+function startRun(state) {
+  reset(state, state.seed);
+  state.status = 'playing';
+  setMessage(state, 'Get the Star of Meridian. Get out the roof door.', 4);
+}
+
+// Handle one pressed key. The queue is drained by the step loop, so a key
+// pressed on a frame with no step in it is still honoured by the next one.
+function handleEdge(state, code, audio) {
+  if (code === 'KeyM') {
+    audio.toggleMute();
+    return;
+  }
+
+  if (state.status === 'title') {
+    if (code === 'Enter' || code === 'Space') {
+      audio.click();
+      startRun(state);
+    }
+    return;
+  }
+
+  if (state.status === 'caught' || state.status === 'police' || state.status === 'escaped') {
+    if (code === 'KeyR' || code === 'Enter') {
+      audio.click();
+      startRun(state);
+    }
+    return;
+  }
+
+  if (state.status !== 'playing') return;
+
+  if (code === 'KeyP' || code === 'Escape') {
+    state.paused = !state.paused;
+    return;
+  }
+  if (state.paused) return;
+
+  if (code === 'KeyE') {
+    const item = tryGrab(state);
+    if (item) {
+      audio.pickup(item.kind === 'diamond');
+      setMessage(state, `+${money(item.value)} — ${item.name}`, 2.5);
+      if (item.kind === 'diamond') {
+        setMessage(state, 'The Star is yours. Now get out — roof door, top right.', 4);
+      }
+    }
+    return;
+  }
+
+  if (code === 'KeyQ') {
+    if (useSmoke(state)) {
+      audio.smoke();
+      setMessage(state, `Smoke out. −${money(GADGETS.smoke.cost)}`, 2);
+    } else {
+      setMessage(state, 'No smoke bombs left.', 1.5);
+    }
+    return;
+  }
+
+  if (code === 'KeyF') {
+    if (useEmp(state)) {
+      audio.emp();
+      setMessage(state, `EMP fired — cameras dark. −${money(GADGETS.emp.cost)}`, 2);
+    } else {
+      setMessage(state, 'No EMP charges left.', 1.5);
+    }
+  }
+}
+
+// One fixed step of the world: a sixtieth of a second of play.
+export function step(state, dt, input, audio) {
+  for (const code of input.drainEdges()) {
+    handleEdge(state, code, audio);
+  }
+
+  if (state.status !== 'playing' || state.paused) return;
+
+  state.time += dt;
+
+  updateThief(state.thief, dt, input);
+
+  for (const guard of state.guards) {
+    const event = updateGuard(guard, dt, {
+      thief: state.thief,
+      walls: state.walls,
+      smoke: state.smoke,
+    });
+    if (event === 'chase') audio.alert();
+    if (event === 'caught') {
+      audio.caught();
+      finishCaught(state);
+      return;
+    }
+  }
+
+  for (const cam of state.cameras) {
+    updateCamera(cam, dt, state.time, state.thief, state.walls, state.smoke);
+  }
+
+  for (let i = state.smoke.length - 1; i >= 0; i -= 1) {
+    state.smoke[i].left -= dt;
+    if (state.smoke[i].left <= 0) state.smoke.splice(i, 1);
+  }
+
+  // The alarm: up while anyone watches, down while nobody does — but never
+  // down from a full alarm, or the lockdown would flicker and the police
+  // countdown with it.
+  let rate = 0;
+  let anySeen = false;
+  let anyChase = false;
+  for (const guard of state.guards) {
+    if (guard.seen) {
+      rate += ALARM.guardSeenRate;
+      anySeen = true;
+    }
+    if (guard.mode === 'chase') {
+      rate += ALARM.chaseRate;
+      anyChase = true;
+    }
+  }
+  for (const cam of state.cameras) {
+    if (cam.seen) {
+      rate += ALARM.cameraSeenRate;
+      anySeen = true;
+    }
+  }
+  state.spotted = anySeen || anyChase;
+  if (state.spotted) state.everSpotted = true;
+
+  if (rate > 0) {
+    state.alarm = Math.min(ALARM.max, state.alarm + rate * dt);
+    state.blipLeft -= dt;
+    if (state.alarm >= 50 && state.blipLeft <= 0) {
+      audio.alarmBlip();
+      state.blipLeft = 1.1;
+    }
+  } else if (state.alarm < ALARM.max) {
+    state.alarm = Math.max(0, state.alarm - ALARM.decayRate * dt);
+  }
+  state.maxAlarm = Math.max(state.maxAlarm, state.alarm);
+
+  if (state.alarm >= ALARM.max && !state.lockdown) {
+    state.lockdown = true;
+    state.policeLeft = ALARM.lockdownSeconds;
+    audio.alert();
+    setMessage(state, 'LOCKDOWN — the police are on their way!', 4);
+  }
+
+  if (state.lockdown) {
+    state.policeLeft -= dt;
+    if (state.policeLeft <= 0) {
+      audio.caught();
+      finishPolice(state);
+      return;
+    }
+  }
+
+  if (state.messageLeft > 0) state.messageLeft -= dt;
+
+  // The getaway: diamond in hand, through the roof door at the top right.
+  const thief = state.thief;
+  if (
+    thief.hasDiamond &&
+    thief.y <= EXIT.triggerY &&
+    thief.x >= EXIT.minX &&
+    thief.x <= EXIT.maxX
+  ) {
+    audio.win();
+    finishEscape(state);
+  }
+}

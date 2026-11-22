@@ -1,88 +1,144 @@
-// Procedural sound, no audio files: a handful of WebAudio oscillator
-// blips for the pickup chime, the alarm, the caught sting and the getaway
-// jingle. Everything is guarded, so a browser with no audio — or a headless
-// screenshot run — just plays silent. M mutes.
+// Procedural sound: every effect is a small oscillator envelope built in
+// code, so the game ships no audio files and makes no network request.
+//
+// The AudioContext is created lazily on the first sound call (which only
+// ever happens after a key press), so browsers that need a user gesture
+// before audio are happy. Everything is wrapped in try/catch: a headless
+// browser with no audio device must never break the game.
+
+// One short tone: a sine/triangle voice that slides in pitch and fades out.
+function tone(ctx, freq, dur, type, gain, slideTo, delay) {
+  const start = ctx.currentTime + (delay || 0);
+  const osc = ctx.createOscillator();
+  const amp = ctx.createGain();
+  osc.type = type || 'sine';
+  osc.frequency.setValueAtTime(freq, start);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), start + dur);
+  amp.gain.setValueAtTime(0.0001, start);
+  amp.gain.exponentialRampToValueAtTime(gain || 0.12, start + 0.012);
+  amp.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+  osc.connect(amp);
+  amp.connect(ctx.destination);
+  osc.start(start);
+  osc.stop(start + dur + 0.05);
+}
+
+// A burst of filtered noise, for smoke and the EMP crackle.
+function noise(ctx, dur, gain, delay) {
+  const start = ctx.currentTime + (delay || 0);
+  const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < len; i += 1) {
+    data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  const amp = ctx.createGain();
+  amp.gain.setValueAtTime(gain || 0.1, start);
+  amp.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+  src.connect(amp);
+  amp.connect(ctx.destination);
+  src.start(start);
+}
+
 export function createAudio() {
-  let context = null;
+  let ctx = null;
   let muted = false;
 
   function ensure() {
-    if (context) return context;
+    if (ctx) return ctx;
     try {
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      if (!AudioContext) return null;
-      context = new AudioContext();
-    } catch {
-      context = null;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+    } catch (err) {
+      ctx = null;
     }
-    return context;
+    return ctx;
   }
 
-  function tone(frequency, seconds, type, gainValue, when = 0) {
-    const ctx = ensure();
-    if (!ctx || muted) return;
+  function safe(fn) {
+    if (muted) return;
+    const c = ensure();
+    if (!c) return;
     try {
-      if (ctx.state === 'suspended') void ctx.resume();
-      const oscillator = ctx.createOscillator();
-      const gain = ctx.createGain();
-      oscillator.type = type;
-      oscillator.frequency.value = frequency;
-      const start = ctx.currentTime + when;
-      gain.gain.setValueAtTime(0.0001, start);
-      gain.gain.exponentialRampToValueAtTime(gainValue, start + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, start + seconds);
-      oscillator.connect(gain).connect(ctx.destination);
-      oscillator.start(start);
-      oscillator.stop(start + seconds + 0.05);
-    } catch {
-      // Audio is decoration: it must never be able to break the game.
+      if (c.state === 'suspended') void c.resume();
+      fn(c);
+    } catch (err) {
+      // Silence is better than a crash: the game plays on without sound.
     }
   }
 
   return {
-    unlock() {
-      ensure();
-    },
     toggleMute() {
       muted = !muted;
       return muted;
     },
+
     isMuted() {
       return muted;
     },
+
+    // UI click: starting the run.
     click() {
-      tone(660, 0.07, 'sine', 0.08);
+      safe((c) => tone(c, 660, 0.09, 'triangle', 0.1, 880));
     },
-    pickup() {
-      tone(880, 0.12, 'sine', 0.12);
-      tone(1320, 0.18, 'sine', 0.1, 0.09);
+
+    // Loot lifted: a bright two-note chime, higher for the diamond.
+    pickup(diamond) {
+      safe((c) => {
+        const base = diamond ? 880 : 620;
+        tone(c, base, 0.1, 'sine', 0.12);
+        tone(c, base * 1.5, 0.16, 'sine', 0.12, null, 0.07);
+      });
     },
-    diamond() {
-      tone(784, 0.14, 'triangle', 0.14);
-      tone(1047, 0.16, 'triangle', 0.14, 0.11);
-      tone(1568, 0.3, 'triangle', 0.12, 0.22);
+
+    // A guard's suspicion just crossed into a chase: a low warning sting.
+    alert() {
+      safe((c) => {
+        tone(c, 220, 0.22, 'sawtooth', 0.09, 165);
+        tone(c, 330, 0.18, 'sawtooth', 0.07, 247, 0.05);
+      });
     },
-    gadget() {
-      tone(320, 0.2, 'sawtooth', 0.06);
-      tone(180, 0.25, 'sawtooth', 0.05, 0.08);
+
+    // The alarm is climbing: a short two-beep siren blip.
+    alarmBlip() {
+      safe((c) => {
+        tone(c, 740, 0.1, 'square', 0.045, 740);
+        tone(c, 520, 0.1, 'square', 0.045, 520, 0.12);
+      });
     },
-    spotted() {
-      tone(220, 0.16, 'square', 0.07);
-      tone(220, 0.16, 'square', 0.07, 0.2);
+
+    // Smoke bomb: a soft whoosh.
+    smoke() {
+      safe((c) => noise(c, 0.5, 0.16));
     },
-    alarmTick() {
-      tone(980, 0.09, 'square', 0.045);
+
+    // EMP burst: a sharp electric crackle.
+    emp() {
+      safe((c) => {
+        noise(c, 0.35, 0.18);
+        tone(c, 1400, 0.25, 'square', 0.05, 120);
+      });
     },
+
+    // Caught: a short falling sting.
     caught() {
-      tone(392, 0.25, 'sawtooth', 0.12);
-      tone(311, 0.25, 'sawtooth', 0.12, 0.2);
-      tone(233, 0.5, 'sawtooth', 0.12, 0.4);
+      safe((c) => {
+        tone(c, 392, 0.3, 'sawtooth', 0.1, 196);
+        tone(c, 196, 0.45, 'sawtooth', 0.1, 98, 0.12);
+      });
     },
-    escaped() {
-      tone(523, 0.16, 'triangle', 0.13);
-      tone(659, 0.16, 'triangle', 0.13, 0.14);
-      tone(784, 0.16, 'triangle', 0.13, 0.28);
-      tone(1047, 0.4, 'triangle', 0.13, 0.42);
+
+    // Clean getaway: a little rising fanfare.
+    win() {
+      safe((c) => {
+        tone(c, 523, 0.14, 'triangle', 0.12);
+        tone(c, 659, 0.14, 'triangle', 0.12, null, 0.12);
+        tone(c, 784, 0.22, 'triangle', 0.12, null, 0.24);
+        tone(c, 1047, 0.3, 'triangle', 0.1, null, 0.38);
+      });
     },
   };
 }

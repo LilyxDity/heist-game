@@ -1,145 +1,149 @@
-// THE MIDNIGHT VAULT — tuning constants.
-//
-// One file holds every number that defines the heist: the hall, the thief,
-// the guards, the cameras, the loot, the alarm and the gadgets. Change a
-// value here and the whole game retunes; nothing else needs to know.
+// The Midnight Vault — all the numbers that define the room, the crew and
+// the loot. One place to tune the game: speeds, costs, timings, positions.
 
-export const WORLD = { width: 1280, height: 720 };
-export const WALL = 24; // thickness of the outer walls, in pixels
-export const STEP = 1 / 60; // fixed simulation step, in seconds
+export const VIEW = { width: 1280, height: 720 };
 
-// The thief. Walking is quick; sneaking is slower but shrinks the range at
-// which guards and cameras can spot you.
+// Thickness of the outer wall ring around the room.
+export const WALL = 20;
+
+// The room's floor, in canvas pixels. The thief, guards and cameras all
+// stay inside this rectangle.
+export const ROOM = { x: WALL, y: WALL, w: VIEW.width - WALL * 2, h: VIEW.height - WALL * 2 };
+
+// The exit door: a gap in the top wall. Slip out here with the diamond.
+export const EXIT = { x: 1120, y: 0, w: 80, h: 26, triggerY: 42, minX: 1116, maxX: 1204 };
+
+// Display cases, the vault plinth and pillars. These block movement and
+// block sight: crouch behind one and a cone cannot find you.
+export const WALLS = [
+  { x: 220, y: 150, w: 200, h: 44 }, // west display case, upper
+  { x: 860, y: 150, w: 200, h: 44 }, // east display case, upper
+  { x: 220, y: 480, w: 200, h: 44 }, // west display case, lower
+  { x: 860, y: 480, w: 200, h: 44 }, // east display case, lower
+  { x: 560, y: 300, w: 160, h: 60 }, // central vault plinth
+  { x: 470, y: 322, w: 36, h: 36 }, // pillar, left of the plinth
+  { x: 774, y: 322, w: 36, h: 36 }, // pillar, right of the plinth
+];
+
+// Where the thief starts a run: bottom-left corner, out of every cone.
+export const THIEF_SPAWN = { x: 140, y: 640 };
+
+// Thief movement.
 export const THIEF = {
-  radius: 13,
-  walkSpeed: 185,
-  sneakSpeed: 108,
-  startX: 640,
-  startY: 648,
-};
-
-// A guard. Suspicion climbs while the thief is inside its vision cone
-// (half as fast while the thief sneaks) and falls when the thief is hidden.
-// At 100 the guard gives chase; a chaser that closes in ends the run.
-export const GUARD = {
   radius: 14,
-  patrolSpeed: 72,
-  chaseSpeed: 168,
-  viewRange: 215,
-  viewHalfAngle: 0.6, // about 34 degrees either side of where it faces
-  suspectRate: 55, // suspicion points per second of clear sight
-  suspectDecay: 22,
-  chaseMemory: 4, // seconds a guard keeps hunting after losing sight
-  catchRange: 26,
+  walkSpeed: 152,
+  sneakSpeed: 72,
+  // How close the thief must be to lift something.
+  grabReach: 56,
 };
 
-// A wall camera. It sweeps back and forth and never moves, but while the
-// thief stands in its cone the alarm climbs directly.
-export const CAMERA = {
-  viewRange: 295,
-  viewHalfAngle: 0.46, // about 26 degrees either side of where it points
-  sweepSpeed: 0.55, // radians per second
-  alarmRate: 10, // alarm points per second of clear sight
+// Everything there is to steal. The diamond is the job; the rest is bonus.
+export const LOOT = [
+  { kind: 'diamond', name: 'Star of Meridian', x: 640, y: 250, value: 50000, color: '#7fe7ff' },
+  { kind: 'gold', name: 'Gold bar', x: 180, y: 360, value: 8000, color: '#ffd34d' },
+  { kind: 'gold', name: 'Gold bar', x: 1100, y: 360, value: 8000, color: '#ffd34d' },
+  { kind: 'ruby', name: 'Ruby idol', x: 320, y: 100, value: 12000, color: '#ff5d73' },
+  { kind: 'emerald', name: 'Emerald mask', x: 960, y: 100, value: 12000, color: '#4de89a' },
+  { kind: 'sapphire', name: 'Sapphire egg', x: 980, y: 620, value: 15000, color: '#6f8cff' },
+];
+
+// The three guards. Each one walks a straight beat between two points and
+// turns around at the ends. Beats run down open lanes, never through a case.
+export const GUARDS = [
+  {
+    name: 'A',
+    waypoints: [[200, 90], [1080, 90]],
+    patrolSpeed: 62,
+    chaseSpeed: 168,
+    visionRange: 265,
+    // Half of the vision cone, in radians.
+    visionHalfAngle: 0.62,
+  },
+  {
+    name: 'B',
+    waypoints: [[200, 400], [1080, 400]],
+    patrolSpeed: 62,
+    chaseSpeed: 168,
+    visionRange: 265,
+    visionHalfAngle: 0.62,
+  },
+  {
+    name: 'C',
+    waypoints: [[1080, 640], [200, 640]],
+    patrolSpeed: 62,
+    chaseSpeed: 168,
+    visionRange: 265,
+    visionHalfAngle: 0.62,
+  },
+];
+
+// The two wall cameras. They sweep back and forth around a fixed base
+// direction and never move from their mount.
+export const CAMERAS = [
+  { x: 640, y: 26, baseAngle: Math.PI / 2, sweep: 0.85, sweepSpeed: 0.55, phase: 0, range: 300, halfAngle: 0.5 },
+  { x: 26, y: 360, baseAngle: 0, sweep: 0.85, sweepSpeed: 0.45, phase: 1.7, range: 300, halfAngle: 0.5 },
+];
+
+// Gadgets. Both cost score, not lives: spend them when a cone is about to
+// catch you, not before.
+export const GADGETS = {
+  smoke: { key: 'Q', cost: 2500, startCount: 3, radius: 95, lifetime: 6, label: 'Smoke bomb' },
+  emp: { key: 'F', cost: 5000, startCount: 2, disableSeconds: 6, label: 'EMP burst' },
 };
 
-// The alarm. It rises while any eye is on the thief and drains slowly while
-// hidden. At 100 the gallery locks down and the police get a 12-second
-// countdown before they storm in.
+// The alarm. It climbs while anyone can see the thief and falls slowly
+// while nobody can. At 100 the museum locks down and the police are called.
 export const ALARM = {
-  guardSightRate: 14,
-  decayRate: 2,
+  max: 100,
+  // A guard staring at the thief fills the meter in about five seconds;
+  // a chase on top of that cuts it to roughly three. Being seen has to
+  // hurt, or the meter is decoration.
+  guardSeenRate: 18,
+  cameraSeenRate: 22,
+  chaseRate: 14,
+  decayRate: 2.5,
   lockdownSeconds: 12,
 };
 
-// Gadgets cost score, not money in hand: smoke blinds every eye for a
-// while, the EMP shuts the cameras off. Spend them where they buy time.
-export const GADGETS = {
-  smokeCount: 2,
-  smokeCost: 2500,
-  smokeRadius: 95,
-  smokeSeconds: 6,
-  empCount: 1,
-  empCost: 5000,
-  empSeconds: 12,
+// How suspicion grows and fades for a guard. Close and standing up fills
+// the meter fast; sneaking and distance slow it right down.
+export const SUSPICION = {
+  baseRate: 55,
+  closeBonus: 90,
+  sneakFactor: 0.45,
+  decayRate: 20,
+  investigateAt: 45,
+  chaseAt: 100,
+  // How long a guard remembers where it last saw the thief.
+  memorySeconds: 4,
 };
 
-export const LOOT_VALUE = { diamond: 500000, gold: 25000, painting: 15000 };
-export const TIME_BONUS_PER_SECOND = 100; // per second under five minutes
-export const TIME_BONUS_CAP_SECONDS = 300;
+// Catching, scoring and grades.
+export const RULES = {
+  catchDistance: 30,
+  escapeBonus: 5000,
+  ghostMaxAlarm: 20,
+  smoothMaxAlarm: 60,
+};
 
-// Cover that blocks both sight and movement: pillars, glass display cases
-// and crates. The vision cones and the thief's collision both use these.
-export const COVER = [
-  { x: 265, y: 105, w: 70, h: 70, kind: 'pillar' }, // top-left pillar
-  { x: 945, y: 105, w: 70, h: 70, kind: 'pillar' }, // top-right pillar
-  { x: 265, y: 505, w: 70, h: 70, kind: 'pillar' }, // bottom-left pillar
-  { x: 945, y: 505, w: 70, h: 70, kind: 'pillar' }, // bottom-right pillar
-  { x: 235, y: 273, w: 130, h: 54, kind: 'case' }, // west display case
-  { x: 915, y: 273, w: 130, h: 54, kind: 'case' }, // east display case
-  { x: 570, y: 132, w: 140, h: 54, kind: 'case' }, // north display case
-  { x: 500, y: 596, w: 60, h: 60, kind: 'crate' }, // entry crates
-  { x: 720, y: 596, w: 60, h: 60, kind: 'crate' },
-];
-
-// The pedestal at the heart of the hall, holding the Star of Meridian.
-export const VAULT = { x: 595, y: 270, w: 90, h: 60 };
-
-// Doors: in through the bottom centre, out through the top right.
-export const ENTRY = { x: 600, y: 696, w: 80, h: 24 };
-export const EXIT = { x: 1120, y: 0, w: 80, h: 24 };
-
-// Everything worth stealing: the diamond on its pedestal, gold bars and
-// two paintings on the walls.
-export const LOOT = [
-  { id: 'diamond', kind: 'diamond', x: 640, y: 300, label: 'STAR OF MERIDIAN', value: LOOT_VALUE.diamond },
-  { id: 'gold-west', kind: 'gold', x: 170, y: 330, label: 'GOLD BAR', value: LOOT_VALUE.gold },
-  { id: 'gold-east', kind: 'gold', x: 1110, y: 330, label: 'GOLD BAR', value: LOOT_VALUE.gold },
-  { id: 'gold-north', kind: 'gold', x: 640, y: 159, label: 'GOLD BAR', value: LOOT_VALUE.gold },
-  { id: 'painting-west', kind: 'painting', x: 60, y: 90, label: 'PAINTING', value: LOOT_VALUE.painting },
-  { id: 'painting-east', kind: 'painting', x: 1220, y: 630, label: 'PAINTING', value: LOOT_VALUE.painting },
-];
-
-// The three guards and their patrol routes: name, waypoints, start index.
-export const GUARD_DEFS = [
-  { name: 'ROOK', waypoints: [[180, 120], [180, 600]], start: 0 },
-  { name: 'VEGA', waypoints: [[470, 392], [810, 392]], start: 0 },
-  { name: 'MARLOWE', waypoints: [[1100, 120], [1100, 600]], start: 1 },
-];
-
-// Cameras on the north wall, sweeping their cones across the hall.
-export const CAMERA_DEFS = [
-  { x: 420, y: 30, baseAngle: Math.PI / 2, sweep: 0.7, phase: 0 },
-  { x: 860, y: 30, baseAngle: Math.PI / 2, sweep: 0.7, phase: Math.PI },
-];
-
-// Palette: dark hall, warm gold loot, amber danger, teal-safe cover tones.
+// Colours for the night-museum look: deep blue floor, brass trim, warm light.
 export const COLORS = {
-  floor: '#1b2334',
-  floorTile: '#202a40',
-  carpet: '#7a1f2b',
-  carpetEdge: '#a83240',
-  wall: '#2e3a52',
-  wallTop: '#42506e',
-  cover: '#31405f',
-  coverTop: '#3d4f73',
-  glass: '#5f7ea8',
-  gold: '#ffc93c',
-  goldGlow: 'rgba(255, 201, 60, 0.35)',
-  diamond: '#bfe9ff',
-  thief: '#e8ecf4',
-  thiefDark: '#232a3a',
-  guard: '#ff5d5d',
-  guardCone: 'rgba(255, 190, 60, 0.20)',
-  guardConeEdge: 'rgba(255, 190, 60, 0.45)',
-  cameraCone: 'rgba(255, 120, 90, 0.16)',
-  cameraConeEdge: 'rgba(255, 120, 90, 0.4)',
-  alarmLow: '#59d98c',
-  alarmMid: '#ffc93c',
-  alarmHigh: '#ff5252',
-  smoke: 'rgba(200, 205, 215, 0.55)',
-  text: '#eef1f7',
-  muted: '#9aa7bd',
+  floor: '#141a2e',
+  floorTile: '#182036',
+  wall: '#2c3350',
+  wallTrim: '#c9a24b',
+  caseGlass: '#3d5a80',
+  caseBase: '#232c4a',
+  plinth: '#3a2f5e',
+  exitDoor: '#2fae6e',
+  thief: '#e8e6df',
+  thiefHood: '#232838',
+  guard: '#31456e',
+  guardAlert: '#a33327',
+  coneCalm: '255, 210, 90',
+  coneAlert: '255, 70, 50',
+  camera: '#8a93a8',
+  hudPanel: 'rgba(8, 12, 24, 0.72)',
+  text: '#f2ead8',
+  mutedText: '#9aa3bd',
 };
-
-export const BEST_KEY = 'midnight-vault-best';
-export const LIVES = 1;

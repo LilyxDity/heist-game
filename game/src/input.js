@@ -1,108 +1,91 @@
-// Keyboard and mouse. WASD or arrows to move, Shift to sneak, E to grab
-// loot, Q for a smoke bomb, F for the EMP, P or Esc to pause, M to mute,
-// R to retry. The mouse only clicks the on-screen buttons; the game never
-// needs it to move.
-export const ACTION_CONFIRM = 'confirm';
-export const ACTION_PAUSE = 'pause';
-export const ACTION_RESTART = 'restart';
-export const ACTION_MUTE = 'mute';
-export const ACTION_INTERACT = 'interact';
-export const ACTION_SMOKE = 'smoke';
-export const ACTION_EMP = 'emp';
+// Keyboard input. Two parts: the keys currently held down (for movement)
+// and a persistent edge queue of single presses (for E, Q, F, Enter, R).
+//
+// The queue matters: the game steps on a fixed clock, and a key pressed on
+// a frame where no step runs must not vanish. Presses sit in the queue
+// until the step loop drains them, however many frames that takes.
 
-const KEY_ACTIONS = {
-  Enter: ACTION_CONFIRM,
-  Space: ACTION_CONFIRM,
-  KeyP: ACTION_PAUSE,
-  Escape: ACTION_PAUSE,
-  KeyR: ACTION_RESTART,
-  KeyM: ACTION_MUTE,
-  KeyE: ACTION_INTERACT,
-  KeyQ: ACTION_SMOKE,
-  KeyF: ACTION_EMP,
+export const MOVE_KEYS = {
+  up: ['KeyW', 'ArrowUp'],
+  down: ['KeyS', 'ArrowDown'],
+  left: ['KeyA', 'ArrowLeft'],
+  right: ['KeyD', 'ArrowRight'],
 };
 
-export function createInput(canvas) {
-  const keys = new Set();
-  const pressed = new Set(); // keys pressed since the last read (edge triggers)
-  const clicks = []; // {x, y} in canvas pixels, since the last read
-  let mouse = { x: 0, y: 0, inside: false };
+const SNEAK_KEYS = ['ShiftLeft', 'ShiftRight'];
+
+// Keys the page should swallow instead of scrolling or tabbing away.
+const SWALLOW = new Set([
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space',
+  'KeyW', 'KeyA', 'KeyS', 'KeyD',
+]);
+
+export function createInput() {
+  const held = new Set();
+  const edgeQueue = [];
 
   function onKeyDown(event) {
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(event.code)) {
-      event.preventDefault();
-    }
-    if (!event.repeat) pressed.add(event.code);
-    keys.add(event.code);
-  }
-  function onKeyUp(event) {
-    keys.delete(event.code);
-  }
-  function toCanvas(event) {
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: ((event.clientX - rect.left) / rect.width) * canvas.width,
-      y: ((event.clientY - rect.top) / rect.height) * canvas.height,
-    };
-  }
-  function onClick(event) {
-    clicks.push(toCanvas(event));
-  }
-  function onMove(event) {
-    mouse = { ...toCanvas(event), inside: true };
-  }
-  function onLeave() {
-    mouse = { x: 0, y: 0, inside: false };
+    if (SWALLOW.has(event.code)) event.preventDefault();
+    if (event.repeat) return;
+    held.add(event.code);
+    edgeQueue.push(event.code);
   }
 
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  canvas.addEventListener('click', onClick);
-  canvas.addEventListener('mousemove', onMove);
-  canvas.addEventListener('mouseleave', onLeave);
+  function onKeyUp(event) {
+    held.delete(event.code);
+  }
+
+  function onBlur() {
+    held.clear();
+  }
 
   return {
-    // A unit move vector from the keys held down (zero when none are held).
+    attach(target) {
+      target.addEventListener('keydown', onKeyDown);
+      target.addEventListener('keyup', onKeyUp);
+      target.addEventListener('blur', onBlur);
+    },
+
+    detach(target) {
+      target.removeEventListener('keydown', onKeyDown);
+      target.removeEventListener('keyup', onKeyUp);
+      target.removeEventListener('blur', onBlur);
+    },
+
+    isHeld(code) {
+      return held.has(code);
+    },
+
+    // The held movement direction as a unit-ish vector, or (0, 0).
     moveVector() {
       let x = 0;
       let y = 0;
-      if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
-      if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
-      if (keys.has('KeyW') || keys.has('ArrowUp')) y -= 1;
-      if (keys.has('KeyS') || keys.has('ArrowDown')) y += 1;
+      if (MOVE_KEYS.left.some((c) => held.has(c))) x -= 1;
+      if (MOVE_KEYS.right.some((c) => held.has(c))) x += 1;
+      if (MOVE_KEYS.up.some((c) => held.has(c))) y -= 1;
+      if (MOVE_KEYS.down.some((c) => held.has(c))) y += 1;
       if (x !== 0 && y !== 0) {
-        const inv = 1 / Math.sqrt(2);
+        const inv = 1 / Math.SQRT2;
         x *= inv;
         y *= inv;
       }
       return { x, y };
     },
-    sneaking() {
-      return keys.has('ShiftLeft') || keys.has('ShiftRight');
+
+    isSneaking() {
+      return SNEAK_KEYS.some((c) => held.has(c));
     },
-    // Actions pressed since the last call, each reported exactly once.
-    takeActions() {
-      const actions = [];
-      for (const code of pressed) {
-        const action = KEY_ACTIONS[code];
-        if (action) actions.push(action);
-      }
-      pressed.clear();
-      return actions;
+
+    // Take every queued press out of the queue, in order, and hand them
+    // back. The queue stays alive between frames: nothing is ever dropped
+    // just because a frame had no fixed step in it.
+    drainEdges() {
+      if (edgeQueue.length === 0) return [];
+      return edgeQueue.splice(0, edgeQueue.length);
     },
-    // Clicks since the last call, each reported exactly once.
-    takeClicks() {
-      return clicks.splice(0, clicks.length);
-    },
-    mouse() {
-      return mouse;
-    },
-    destroy() {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-      canvas.removeEventListener('click', onClick);
-      canvas.removeEventListener('mousemove', onMove);
-      canvas.removeEventListener('mouseleave', onLeave);
+
+    pendingEdges() {
+      return edgeQueue.length;
     },
   };
 }
